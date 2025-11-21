@@ -1310,7 +1310,7 @@ class AgentRulesViewProvider implements vscode.WebviewViewProvider {
               </div>
             </div>
             <div class="section-body">
-              <div id="project-subtitle" class="section-subtitle">Workspace-specific rules stored in .cursor/rules.</div>
+              <div id="project-subtitle" class="section-subtitle">Workspace-specific rules. Allows metadata like <code>alwaysApply:</code>, <code>description:</code>, and <code>glob:</code>.</div>
               <ul id="project-rules" class="rules-list project-list"></ul>
             </div>
           </div>

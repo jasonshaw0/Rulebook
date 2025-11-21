@@ -1,0 +1,8 @@
+---
+description: Documentation and Code Comments
+scope: preset
+tag: #Documentation
+globs:
+alwaysApply: false
+---
+

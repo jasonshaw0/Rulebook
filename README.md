@@ -1,71 +1,58 @@
 ## Rulebook – System Instruction Manager
 
-#### Rulebook is an IDE extension that makes accessing, managing, and discovering system instructions effortless, elevating agent-assisted development to the next level.
-
-  <table>
-    <tr>
-      <td>
-        <h4><i>It's not magic, it's markdown!</i></h4>
-      </td>
-      <td>
-        <img src="./media/rulebook-logo-nobg-blue.png" alt="Rulebook logo" width="25%" style="vertical-align: middle; margin-left:0px;" />
-      </td>
-    </tr>
-  </table>
-
-
-stored in `.cursor/rules`. It is designed to stay out of your way while keeping your rules organized. Today it runs in Cursor, with VS Code support planned next.
-
-
-### Features
-
-- Clean and simple sidebar interface in your editor (currently Cursor), accessible with a single icon click.
-- Works directly with `.cursor/rules` using the same MDC metadata (`description`, `scope`, `globs`, `alwaysApply`) as native project rules.
-- Browse every rule in `.cursor/rules` and open it with a single click.
-- Create new MDC rules with the correct header so they appear instantly inside Cursor Settings → Rules.
-- Delete rules you no longer need.
-- Save project rules as presets that persist across projects on your device (`~/.cursor-agent-rules/presets`).
-- Reapply saved presets back into the active project with one button.
-- Browse a small built‑in catalog of example rules and copy them into your project or presets.
+#### An IDE extension that streamlines using, editing, and discovering system instructions. Rulebook is simple but it elevates agent-assisted development to the next level.
 
 <p align="center">
   <span style="font-weight: bold; font-size: 1.15em;"><i>It's not magic, it's markdown!</i></span>
   <img src="./media/rulebook-logo-nobg-blue.png" alt="Rulebook logo" width="20%" style="vertical-align: middle; margin-left:8px;" />
 </p>
 
+- *Early Development (v0.0.9). Expect rapid changes, bugs, etc.*
+- *github.com/jasonshaw0*
+
+---
+
+### What's Rulebook?
+
+- **Convenient:** One icon in the activity bar opens a focused sidebar for all your system instructions—no more digging through nested settings UIs.
+- **Direct:** Reads and writes to IDE-native rules directly-[VSCode placeholder], and `.cursor/rules/` in Cursor. Maintains the same MDC metadata you already rely on (`alwaysApply`, `description`, `glob`, `scope`, etc.).
+- **Innovative:** Extends the native experience with:
+  - Browsing every existing rule and opening it with a single click.
+  - Creating new MDC rules with the correct header so they appear instantly in your editor's native rules UI.
+  - Deleting rules you no longer need.
+  - Saving rules as presets that persist across projects on your device, then adding saved presets to workspace with one click.
+  - Reapplying saved presets back into the active project with one button.
+  - Browsing a small built‑in catalog of effective rules and system instructions. Sorting with tags, and copying them into your project or presets lets you make custom edits.
+  - Custom color-coded tags via a custom `tag:` metadata field. Easily organize and filter rules and presets for any use case.
+
 ### Status
 
-- Very early development – expect rapid changes.
-- Currently implemented as a Cursor extension (installed via VSIX during development).
-- VS Code support is planned and will use the same rule/preset format.
+- Very early development (v0.0.9).
+- Currently implemented as a Cursor extension (installed via [`rulebook-agent-rule-manager-0.0.9.vsix`](./rulebook-agent-rule-manager-0.0.9.vsix)). 
+- Planned upload to Open VSX Registry, VSCode support after that.
 
-### Installation (dev build, Cursor)
+### Installation
+**Install from prebuilt VSIX:** Open VSX Registry access is planned soon. Until then, you can install Rulebook from a prebuilt `.vsix` file.
+
+1. Download prebuilt [`rulebook-agent-rule-manager-0.0.9.vsix`](./rulebook-agent-rule-manager-0.0.9.vsix).
+2. Open your editor (Cursor) `Extensions → … → Install from VSIX…`.
+3. Experience the best thing since sliced bread.
+
+**Build from source:** If you want to contribute or test changes locally, you can build the `.vsix` from source locally.
 
 ```bash
 npm install
 npm run compile
 vsce package
 ```
+Then same steps as above. Feel free to contribute or modify as you please. 
 
-Then install the generated `.vsix` in your editor (for now, Cursor):
+*If making changes it's good practice to fully uninstall the extension, reload extensions, and then build a new file each time you update it.*
 
-1. Open Cursor.
-2. Go to `Extensions → … → Install from VSIX…`.
-3. Select the generated `rulebook-*.vsix` file.
 
-### Usage
-
-- Open your editor with the Rulebook extension installed (currently Cursor).
-- Open the sidebar and click the Rulebook icon.
-- From the Rulebook view you can:
-  - Browse existing rules and open them in an editor.
-  - Create new MDC rules with the correct metadata fields.
-  - Delete rules that are no longer needed.
-  - Save rules as presets and apply presets to the current project.
+**Usage:** It's intuitive to use and I can't be bothered to make a guide.
 
 ### Screenshots
-
-Capture a few screenshots of the extension and save them under `./media` using the filenames below so they render automatically:
 
 ![Rulebook sidebar with rule list](./media/rulebook-sidebar-rules.png)
 
@@ -76,4 +63,6 @@ Capture a few screenshots of the extension and save them under `./media` using t
 ### License
 
 MIT – see `LICENSE`.
+
+Dont steal my icons brah!
 
