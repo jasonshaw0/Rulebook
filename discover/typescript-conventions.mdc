@@ -1,0 +1,12 @@
+---
+description: TypeScript Code Conventions
+scope: preset
+tag: #TypeScript
+globs:
+alwaysApply: false
+---
+
+# @agent-rule
+
+Placeholder content for TypeScript conventions rule.
+

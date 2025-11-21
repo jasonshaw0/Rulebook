@@ -2,7 +2,7 @@
   "name": "rulebook-agent-rule-manager",
   "displayName": "Rulebook - Agent Rule Manager",
   "description": "Cursor-only extension for managing project rules and presets.",
-  "version": "0.0.4",
+  "version": "0.0.9",
   "publisher": "jasonshaw0",
   "icon": "media/rulebook-logo-nobg-blue.png",
   "repository": {
@@ -24,7 +24,7 @@
       "activitybar": [
         {
           "id": "agentRules",
-          "title": "Rulebook - Agent Rule Manager",
+          "title": "Rulebook",
           "icon": "media/rulebook-icon.svg"
         }
       ]
@@ -33,7 +33,7 @@
       "agentRules": [
         {
           "id": "agentRulesView",
-          "name": "Rulebook - Agent Rule Manager",
+          "name": "Rulebook",
           "type": "webview"
         }
       ]

@@ -1,0 +1,12 @@
+---
+description: General Utilities Helpers
+scope: preset
+tag: Utilities
+globs:
+alwaysApply: false
+---
+
+# @agent-rule
+
+Placeholder content for general utilities rule.
+

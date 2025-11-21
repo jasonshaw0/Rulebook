@@ -4,25 +4,35 @@ import * as path from 'path';
 import * as os from 'os';
 
 type RuleScope = 'project' | 'preset';
+type RuleSource = 'project' | 'userPreset' | 'discover';
 
 interface RuleDescriptor {
   id: string; // file path, used as stable identifier
   title: string;
   scope: RuleScope;
   filePath: string;
+  source: RuleSource;
+  tag?: string; // canonical tag name without leading '#'
 }
 
 interface GroupedRules {
-  project: Array<Pick<RuleDescriptor, 'id' | 'title'>>;
-  presets: Array<Pick<RuleDescriptor, 'id' | 'title'>>;
+  project: Array<Pick<RuleDescriptor, 'id' | 'title' | 'tag'>>;
+  presets: Array<Pick<RuleDescriptor, 'id' | 'title' | 'tag'>>;
+  discover: Array<Pick<RuleDescriptor, 'id' | 'title' | 'tag'>>;
+  allTags: string[];
   projectRulesSupported: boolean;
+  projectRulesDirExists: boolean;
+  projectRulesPath: string | null;
+  workspaceName: string | null;
 }
 
 class RulesManager {
   private readonly workspaceRoot?: string;
+  private readonly extensionPath: string;
 
-  constructor(_context: vscode.ExtensionContext) {
+  constructor(context: vscode.ExtensionContext) {
     this.workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    this.extensionPath = context.extensionPath;
   }
 
   private parseFrontmatter(text: string): { meta: Record<string, string>; body: string } {
@@ -65,6 +75,10 @@ class RulesManager {
     return lower === 'project' || lower === 'preset' ? (lower as RuleScope) : fallback;
   }
 
+  private getDiscoverDir(): string {
+    return path.join(this.extensionPath, 'discover');
+  }
+
   private getPresetDir(): string {
     // Local presets managed by Rulebook; Cursor itself ignores this directory.
     return path.join(os.homedir(), '.cursor-agent-rules', 'presets');
@@ -81,11 +95,6 @@ class RulesManager {
   async init(): Promise<void> {
     // Best-effort create; never throw from here so activation always succeeds.
     const dirs = [this.getPresetDir()];
-    const projectDir = this.getProjectDir();
-    if (projectDir) {
-      dirs.push(projectDir);
-    }
-
     await Promise.all(
       dirs.map(dir =>
         fs.promises.mkdir(dir, { recursive: true }).catch(err => {
@@ -97,7 +106,8 @@ class RulesManager {
 
   private async loadRulesFromDir(
     dir: string | undefined,
-    defaultScope: RuleScope
+    defaultScope: RuleScope,
+    source: RuleSource
   ): Promise<RuleDescriptor[]> {
     if (!dir) {
       return [];
@@ -124,7 +134,7 @@ class RulesManager {
       }
       const parsed = await this.parseRuleFile(fullPath, defaultScope);
       if (parsed) {
-        rules.push(parsed);
+        rules.push({ ...parsed, source });
       }
     }
 
@@ -134,7 +144,7 @@ class RulesManager {
   private async parseRuleFile(
     filePath: string,
     defaultScope: RuleScope
-  ): Promise<RuleDescriptor | undefined> {
+  ): Promise<Omit<RuleDescriptor, 'source'> | undefined> {
     let text: string;
     try {
       text = await fs.promises.readFile(filePath, 'utf8');
@@ -146,6 +156,17 @@ class RulesManager {
 
     let scope: RuleScope = this.normalizeScope(meta.scope, defaultScope);
     let title = meta.description?.trim() || path.basename(filePath, path.extname(filePath));
+
+    let tag: string | undefined;
+    if (meta.tag) {
+      let raw = meta.tag.split(',')[0].trim();
+      if (raw.startsWith('#')) {
+        raw = raw.slice(1);
+      }
+      if (raw) {
+        tag = raw;
+      }
+    }
 
     if (!meta.scope) {
       const scopeMatch = /^#\s*scope\s*:\s*(project|preset)\s*$/im.exec(body);
@@ -168,33 +189,58 @@ class RulesManager {
       id: filePath,
       filePath,
       scope,
-      title
+      title,
+      tag
     };
   }
 
   private async loadAllRules(): Promise<RuleDescriptor[]> {
-    const [presetRules, projectRules] = await Promise.all([
-      this.loadRulesFromDir(this.getPresetDir(), 'preset'),
-      this.loadRulesFromDir(this.getProjectDir(), 'project')
+    const [presetRules, projectRules, discoverRules] = await Promise.all([
+      this.loadRulesFromDir(this.getPresetDir(), 'preset', 'userPreset'),
+      this.loadRulesFromDir(this.getProjectDir(), 'project', 'project'),
+      this.loadRulesFromDir(this.getDiscoverDir(), 'preset', 'discover')
     ]);
 
-    return [...presetRules, ...projectRules];
+    return [...presetRules, ...projectRules, ...discoverRules];
   }
 
   async getGroupedRules(): Promise<GroupedRules> {
     const all = await this.loadAllRules();
+    const projectDir = this.getProjectDir();
+    const projectRulesDirExists = projectDir ? fs.existsSync(projectDir) : false;
+    const workspaceName = this.workspaceRoot ? path.basename(this.workspaceRoot) : null;
 
     const project = all
-      .filter(r => r.scope === 'project')
-      .map(r => ({ id: r.id, title: r.title }));
+      .filter(r => r.source === 'project')
+      .map(r => ({ id: r.id, title: r.title, tag: r.tag }));
     const presets = all
-      .filter(r => r.scope === 'preset')
-      .map(r => ({ id: r.id, title: r.title }));
+      .filter(r => r.source === 'userPreset')
+      .map(r => ({ id: r.id, title: r.title, tag: r.tag }));
+    const discover = all
+      .filter(r => r.source === 'discover')
+      .map(r => ({ id: r.id, title: r.title, tag: r.tag }));
+
+    const tagSet = new Set<string>();
+    for (const rule of [...project, ...presets, ...discover]) {
+      if (rule.tag) {
+        tagSet.add(rule.tag);
+      }
+    }
+
+    let projectRulesPath: string | null = null;
+    if (projectDir && this.workspaceRoot) {
+      projectRulesPath = path.relative(this.workspaceRoot, projectDir).replace(/\\/g, '/');
+    }
 
     return {
       project,
       presets,
-      projectRulesSupported: Boolean(this.workspaceRoot)
+      discover,
+      allTags: Array.from(tagSet),
+      projectRulesSupported: Boolean(this.workspaceRoot),
+      projectRulesDirExists,
+      projectRulesPath,
+      workspaceName
     };
   }
 
@@ -253,10 +299,15 @@ class RulesManager {
 
     await fs.promises.writeFile(filePath, content, 'utf8');
 
-    const descriptor = await this.parseRuleFile(filePath, scope);
-    if (!descriptor) {
+    const parsed = await this.parseRuleFile(filePath, scope);
+    if (!parsed) {
       throw new Error('Failed to create rule file.');
     }
+
+    const descriptor: RuleDescriptor = {
+      ...parsed,
+      source: scope === 'project' ? 'project' : 'userPreset'
+    };
 
     await this.syncCursorrules();
     return descriptor;
@@ -279,6 +330,14 @@ class RulesManager {
   async findRuleById(id: string): Promise<RuleDescriptor | undefined> {
     const all = await this.loadAllRules();
     return all.find(r => r.id === id);
+  }
+
+  async ensureProjectRulesDir(): Promise<void> {
+    const dir = this.getProjectDir();
+    if (!dir) {
+      throw new Error('Open a workspace folder to create project rules.');
+    }
+    await fs.promises.mkdir(dir, { recursive: true });
   }
 
   async duplicateRuleToScope(sourceId: string, targetScope: RuleScope): Promise<RuleDescriptor> {
@@ -334,10 +393,15 @@ class RulesManager {
 
     await fs.promises.writeFile(destPath, finalContent, 'utf8');
 
-    const descriptor = await this.parseRuleFile(destPath, targetScope);
-    if (!descriptor) {
+    const parsed = await this.parseRuleFile(destPath, targetScope);
+    if (!parsed) {
       throw new Error('Failed to create duplicated rule.');
     }
+
+    const descriptor: RuleDescriptor = {
+      ...parsed,
+      source: targetScope === 'project' ? 'project' : 'userPreset'
+    };
 
     await this.syncCursorrules();
     return descriptor;
@@ -415,6 +479,24 @@ class AgentRulesViewProvider implements vscode.WebviewViewProvider {
         }
         case 'toggleSection': {
           // No-op on extension side; purely client-side in the webview.
+          break;
+        }
+        case 'createProjectRulesDir': {
+          try {
+            await this.rulesManager.ensureProjectRulesDir();
+            await this.postState();
+          } catch (err) {
+            const message =
+              err instanceof Error
+                ? err.message
+                : 'Failed to create .cursor/rules directory. See console for details.';
+            vscode.window.showErrorMessage(message);
+            console.error('Rulebook: failed to create project rules directory', err);
+          }
+          break;
+        }
+        case 'refreshDiscover': {
+          await this.postState();
           break;
         }
         default:
@@ -516,6 +598,41 @@ class AgentRulesViewProvider implements vscode.WebviewViewProvider {
           background-color: var(--vscode-sideBar-background, transparent);
         }
 
+        .rb-header {
+          padding: 8px 10px 6px 10px;
+          border-bottom: 1px solid var(--vscode-sideBarSectionHeader-border, rgba(255, 255, 255, 0.06));
+        }
+
+        .rb-header-main {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          margin-bottom: 2px;
+        }
+
+        .rb-logo {
+          width: 18px;
+          height: 18px;
+          flex-shrink: 0;
+        }
+
+        .rb-title-main {
+          font-size: 16px;
+          font-weight: 600;
+        }
+
+        .rb-title-sub {
+          font-size: 11px;
+          opacity: 0.8;
+          margin-top: 1px;
+        }
+
+        .rb-caption {
+          font-size: 11px;
+          opacity: 0.7;
+          margin-top: 4px;
+        }
+
         .sections {
           display: flex;
           flex-direction: column;
@@ -561,12 +678,24 @@ class AgentRulesViewProvider implements vscode.WebviewViewProvider {
           text-transform: uppercase;
           font-size: 11px;
           opacity: 0.9;
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+
+        .project-name {
+          opacity: 0.85;
+          font-weight: 500;
         }
 
         .section-subtitle {
           font-size: 11px;
-          opacity: 0.65;
-          margin-bottom: 2px;
+          opacity: 0.7;
+          margin-bottom: 1px;
+        }
+
+        .section[data-scope="discover"] .section-subtitle {
+          margin-bottom: 6px;
         }
 
         .header-icon-button {
@@ -665,6 +794,107 @@ class AgentRulesViewProvider implements vscode.WebviewViewProvider {
         .muted {
           opacity: 0.6;
         }
+
+        .hidden {
+          display: none !important;
+        }
+
+        .section-header-actions {
+          display: flex;
+          align-items: center;
+          gap: 4px;
+        }
+
+        .primary-button {
+          border: none;
+          border-radius: 4px;
+          padding: 2px 8px;
+          font-size: 12px;
+          cursor: pointer;
+          background-color: var(--vscode-button-background);
+          color: var(--vscode-button-foreground);
+        }
+
+        .primary-button:hover {
+          background-color: var(--vscode-button-hoverBackground);
+        }
+
+        .rule-left {
+          display: flex;
+          align-items: center;
+          gap: 4px;
+          flex: 1;
+          min-width: 0;
+          padding-right: 6px;
+        }
+
+        .tag-pill {
+          font-size: 11px;
+          font-weight: 600;
+          margin-left: 4px;
+          color: inherit;
+        }
+
+        .tag-bar {
+          margin-bottom: 4px;
+        }
+
+        .tag-tab {
+          display: inline-flex;
+          align-items: center;
+          padding: 3px 8px;
+          border-radius: 10px;
+          font-size: 11px;
+          margin: 0 4px 4px 0;
+          cursor: pointer;
+        }
+
+        .tag-tab.selected {
+          font-weight: 600;
+          box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.4);
+        }
+
+        .tag-tab-close {
+          margin-right: 4px;
+          font-size: 11px;
+          opacity: 0.9;
+          color: rgba(0, 0, 0, 0.8);
+        }
+
+        .project-list .rule-item {
+          position: relative;
+          border-left: 1px solid var(--vscode-tree-indentGuidesStroke, var(--vscode-contrastBorder));
+          padding-left: 10px;
+        }
+
+        .project-list .rule-item::before {
+          content: "";
+          position: absolute;
+          left: 2px;
+          top: 50%;
+          width: 6px;
+          height: 6px;
+          margin-top: -3px;
+          border-radius: 50%;
+          background-color: var(--vscode-icon-foreground, var(--vscode-foreground));
+          opacity: 0.6;
+        }
+
+        .presets-list,
+        .discover-list {
+          border-top: 1px solid rgba(255, 255, 255, 0.14);
+          margin-top: 2px;
+        }
+
+        .presets-list .rule-item,
+        .discover-list .rule-item {
+          border-bottom: 1px solid rgba(255, 255, 255, 0.14);
+        }
+
+        .presets-list .rule-item:last-child,
+        .discover-list .rule-item:last-child {
+          border-bottom: none;
+        }
       </style>
     `;
 
@@ -674,8 +904,36 @@ class AgentRulesViewProvider implements vscode.WebviewViewProvider {
       const state = {
         project: [],
         presets: [],
-        projectRulesSupported: true
+        discover: [],
+        allTags: [],
+        projectRulesSupported: true,
+        projectRulesDirExists: false,
+        projectRulesPath: null,
+        selectedDiscoverTag: null,
+        tagColors: {},
+        workspaceName: null
       };
+
+      const tagPalette = [
+        '#ea580c',
+        '#15803d',
+        '#1d4ed8',
+        '#a16207',
+        '#9d174d',
+        '#7c2d12',
+        '#0f766e',
+        '#b91c1c'
+      ];
+
+      function getTagColor(tag) {
+        if (!tag) return null;
+        if (!state.tagColors[tag]) {
+          const keys = Object.keys(state.tagColors);
+          const color = tagPalette[keys.length % tagPalette.length];
+          state.tagColors[tag] = color;
+        }
+        return state.tagColors[tag];
+      }
 
       function renderSection(scope, items) {
         const list = document.getElementById(scope + '-rules');
@@ -694,11 +952,26 @@ class AgentRulesViewProvider implements vscode.WebviewViewProvider {
         for (const rule of items) {
           const li = document.createElement('li');
           li.className = 'rule-item';
+          const left = document.createElement('div');
+          left.className = 'rule-left';
 
           const titleSpan = document.createElement('span');
           titleSpan.className = 'rule-title';
           titleSpan.textContent = rule.title || 'Untitled rule';
-          li.appendChild(titleSpan);
+          left.appendChild(titleSpan);
+
+          if (rule.tag) {
+            const tagSpan = document.createElement('span');
+            tagSpan.className = 'tag-pill';
+            tagSpan.textContent = '#' + rule.tag;
+            const color = getTagColor(rule.tag);
+            if (color) {
+              tagSpan.style.color = color;
+            }
+            left.appendChild(tagSpan);
+          }
+
+          li.appendChild(left);
 
           const actions = document.createElement('div');
           actions.className = 'rule-actions';
@@ -756,13 +1029,140 @@ class AgentRulesViewProvider implements vscode.WebviewViewProvider {
         }
       }
 
+      function renderDiscover() {
+        const list = document.getElementById('discover-rules');
+        const tagBar = document.getElementById('discover-tags');
+        if (!list || !tagBar) {
+          return;
+        }
+
+        // Tag tabs
+        tagBar.innerHTML = '';
+        let tags = Array.from(state.allTags || []);
+        if (state.selectedDiscoverTag) {
+          tags = tags.sort((a, b) => {
+            if (a === state.selectedDiscoverTag) return -1;
+            if (b === state.selectedDiscoverTag) return 1;
+            return a.localeCompare(b);
+          });
+        }
+
+        tags.forEach(tag => {
+          const pill = document.createElement('span');
+          pill.className = 'tag-tab';
+          const color = getTagColor(tag);
+          if (color) {
+            pill.style.backgroundColor = color;
+          }
+
+          if (tag === state.selectedDiscoverTag) {
+            pill.classList.add('selected');
+            const close = document.createElement('span');
+            close.className = 'tag-tab-close';
+            close.textContent = '×';
+            pill.appendChild(close);
+          }
+
+          const label = document.createElement('span');
+          label.textContent =
+            '#' + tag;
+          pill.appendChild(label);
+
+          pill.addEventListener('click', (event) => {
+            event.stopPropagation();
+            if (tag === state.selectedDiscoverTag) {
+              state.selectedDiscoverTag = null;
+            } else {
+              state.selectedDiscoverTag = tag;
+            }
+            renderDiscover();
+          });
+
+          tagBar.appendChild(pill);
+        });
+
+        // List of discover rules
+        list.innerHTML = '';
+        let rules = state.discover || [];
+        if (state.selectedDiscoverTag) {
+          rules = rules.filter(r => r.tag === state.selectedDiscoverTag);
+        }
+
+        if (!rules.length) {
+          const empty = document.createElement('div');
+          empty.className = 'empty-text';
+          empty.textContent = 'No rules yet.';
+          list.appendChild(empty);
+          return;
+        }
+
+        for (const rule of rules) {
+          const li = document.createElement('li');
+          li.className = 'rule-item';
+
+          const left = document.createElement('div');
+          left.className = 'rule-left';
+
+          const titleSpan = document.createElement('span');
+          titleSpan.className = 'rule-title';
+          titleSpan.textContent = rule.title || 'Untitled rule';
+          left.appendChild(titleSpan);
+
+          if (rule.tag) {
+            const tagSpan = document.createElement('span');
+            tagSpan.className = 'tag-pill';
+            tagSpan.textContent = '#' + rule.tag;
+            const color = getTagColor(rule.tag);
+            if (color) {
+              tagSpan.style.color = color;
+            }
+            left.appendChild(tagSpan);
+          }
+
+          li.appendChild(left);
+
+          const actions = document.createElement('div');
+          actions.className = 'rule-actions';
+
+          const toPresetBtn = document.createElement('button');
+          toPresetBtn.className = 'icon-button';
+          toPresetBtn.title = 'Save as user preset';
+          toPresetBtn.innerHTML = '<span class="material-icons-outlined">post_add</span>';
+          toPresetBtn.addEventListener('click', (event) => {
+            event.stopPropagation();
+            vscode.postMessage({ command: 'projectToPreset', id: rule.id });
+          });
+
+          const toProjectBtn = document.createElement('button');
+          toProjectBtn.className = 'icon-button';
+          toProjectBtn.title = 'Add to project rules';
+          toProjectBtn.innerHTML = '<span class="material-icons-outlined">publish</span>';
+          toProjectBtn.addEventListener('click', (event) => {
+            event.stopPropagation();
+            vscode.postMessage({ command: 'presetToProject', id: rule.id });
+          });
+
+          actions.appendChild(toPresetBtn);
+          actions.appendChild(toProjectBtn);
+
+          li.appendChild(actions);
+
+          list.appendChild(li);
+        }
+      }
+
       function renderAll() {
         renderSection('project', state.project);
         renderSection('presets', state.presets);
+        renderDiscover();
 
         const projectSection = document.querySelector('[data-scope="project"]');
         const projectSubtitle = document.getElementById('project-subtitle');
         const projectAddButton = document.getElementById('add-project-rule');
+        const projectTitle = document.getElementById('project-title');
+        const projectCreateButton = document.getElementById('project-create-dir');
+
+        const workspaceName = state.workspaceName || 'Workspace';
 
         if (!state.projectRulesSupported) {
           if (projectSection) {
@@ -774,15 +1174,48 @@ class AgentRulesViewProvider implements vscode.WebviewViewProvider {
           if (projectAddButton) {
             projectAddButton.disabled = true;
           }
-        } else {
-          if (projectSection) {
-            projectSection.classList.remove('muted');
+          if (projectTitle) {
+            projectTitle.innerHTML = '<span class="project-name">' + workspaceName + '</span> Project Rules';
+            projectTitle.classList.remove('hidden');
+          }
+          if (projectCreateButton) {
+            projectCreateButton.classList.add('hidden');
+          }
+          return;
+        }
+
+        if (projectSection) {
+          projectSection.classList.remove('muted');
+        }
+
+        if (state.projectRulesDirExists) {
+          if (projectTitle) {
+            projectTitle.innerHTML = '<span class="project-name">' + workspaceName + '</span> Project Rules';
+            projectTitle.classList.remove('hidden');
+          }
+          if (projectCreateButton) {
+            projectCreateButton.classList.add('hidden');
           }
           if (projectSubtitle) {
-            projectSubtitle.textContent = 'Applied only to this workspace.';
+            projectSubtitle.textContent = 'Workspace-specific rules stored in .cursor/rules.';
           }
           if (projectAddButton) {
             projectAddButton.disabled = false;
+            projectAddButton.classList.remove('hidden');
+          }
+        } else {
+          if (projectTitle) {
+            projectTitle.innerHTML = '<span class="project-name">' + workspaceName + '</span> Project Rules';
+            projectTitle.classList.remove('hidden');
+          }
+          if (projectCreateButton) {
+            projectCreateButton.classList.remove('hidden');
+          }
+          if (projectAddButton) {
+            projectAddButton.classList.add('hidden');
+          }
+          if (projectSubtitle) {
+            projectSubtitle.textContent = 'Create .cursor/rules to start adding project rules.';
           }
         }
       }
@@ -792,7 +1225,12 @@ class AgentRulesViewProvider implements vscode.WebviewViewProvider {
         if (message.type === 'rulesState') {
           state.project = message.state.project || [];
           state.presets = message.state.presets || [];
+          state.discover = message.state.discover || [];
+          state.allTags = message.state.allTags || [];
           state.projectRulesSupported = !!message.state.projectRulesSupported;
+          state.projectRulesDirExists = !!message.state.projectRulesDirExists;
+          state.projectRulesPath = message.state.projectRulesPath || null;
+          state.workspaceName = message.state.workspaceName || null;
           renderAll();
         }
       });
@@ -817,6 +1255,14 @@ class AgentRulesViewProvider implements vscode.WebviewViewProvider {
         document.getElementById('add-preset-rule')?.addEventListener('click', (event) => {
           event.stopPropagation();
           handleAdd('preset');
+        });
+        document.getElementById('project-create-dir')?.addEventListener('click', (event) => {
+          event.stopPropagation();
+          vscode.postMessage({ command: 'createProjectRulesDir' });
+        });
+        document.getElementById('refresh-discover')?.addEventListener('click', (event) => {
+          event.stopPropagation();
+          vscode.postMessage({ command: 'refreshDiscover' });
         });
 
         document.querySelectorAll('.section-header').forEach(header => {
@@ -854,15 +1300,18 @@ class AgentRulesViewProvider implements vscode.WebviewViewProvider {
             <div class="section-header" data-scope="project">
               <div class="section-header-left">
                 <span class="chevron">▾</span>
-                <div class="section-title">Project Rules</div>
+                <div id="project-title" class="section-title"></div>
               </div>
-              <button id="add-project-rule" class="header-icon-button" title="Add project rule">
-                <span class="material-icons-outlined">add</span>
-              </button>
+              <div class="section-header-actions">
+                <button id="project-create-dir" class="primary-button hidden">Create .cursor/rules</button>
+                <button id="add-project-rule" class="header-icon-button" title="Add project rule">
+                  <span class="material-icons-outlined">add</span>
+                </button>
+              </div>
             </div>
             <div class="section-body">
-              <div id="project-subtitle" class="section-subtitle">Applied only to this workspace.</div>
-              <ul id="project-rules" class="rules-list"></ul>
+              <div id="project-subtitle" class="section-subtitle">Workspace-specific rules stored in .cursor/rules.</div>
+              <ul id="project-rules" class="rules-list project-list"></ul>
             </div>
           </div>
 
@@ -870,15 +1319,34 @@ class AgentRulesViewProvider implements vscode.WebviewViewProvider {
             <div class="section-header" data-scope="presets">
               <div class="section-header-left">
                 <span class="chevron">▾</span>
-                <div class="section-title">Presets</div>
+                <div class="section-title">User Presets</div>
               </div>
               <button id="add-preset-rule" class="header-icon-button" title="Add preset rule">
                 <span class="material-icons-outlined">add</span>
               </button>
             </div>
             <div class="section-body">
-              <div class="section-subtitle">Saved rules that are not currently applied.</div>
-              <ul id="presets-rules" class="rules-list"></ul>
+              <div class="section-subtitle">Reusable rules shared across all workspaces on this device.</div>
+              <ul id="presets-rules" class="rules-list presets-list"></ul>
+            </div>
+          </div>
+
+          <div class="section" data-scope="discover">
+            <div class="section-header" data-scope="discover">
+              <div class="section-header-left">
+                <span class="chevron">▾</span>
+                <div class="section-title">Discover Rules</div>
+              </div>
+              <div class="section-header-actions">
+                <button id="refresh-discover" class="header-icon-button" title="Refresh discover rules">
+                  <span class="material-icons-outlined">refresh</span>
+                </button>
+              </div>
+            </div>
+            <div class="section-body">
+              <div class="section-subtitle">Starter rules bundled with Rulebook. Copy them into your project or presets.</div>
+              <div id="discover-tags" class="tag-bar"></div>
+              <ul id="discover-rules" class="rules-list discover-list"></ul>
             </div>
           </div>
         </div>
