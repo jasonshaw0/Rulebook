@@ -1,11 +1,8 @@
 ## Rulebook – System Instruction Manager
 
-#### An IDE extension that streamlines using, editing, and discovering system instructions. Rulebook is simple but it elevates agent-assisted development to the next level.
+#### *It's not magic, it's markdown!*
 
-<p align="center">
-  <span style="font-weight: bold; font-size: 1.15em;"><i>It's not magic, it's markdown!</i></span>
-  <img src="./media/rulebook-logo-nobg-blue.png" alt="Rulebook logo" width="20%" style="vertical-align: middle; margin-left:8px;" />
-</p>
+#### IDE extension to streamline using, editing, and discovering system instructions. Designed to fix existing shortcomings and elevate agent-assisted development to the next level.
 
 - *Early Development (v0.0.9). Expect rapid changes, bugs, etc.*
 - *github.com/jasonshaw0*
