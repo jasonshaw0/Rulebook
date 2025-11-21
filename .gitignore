@@ -1,0 +1,40 @@
+# Node / npm
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Build artifacts
+out/
+dist/
+*.vsix
+
+# TypeScript
+*.tsbuildinfo
+
+# VS Code / Cursor / IDE config
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Cursor-specific
+.cursor/
+.cursorignore
+.cursorrules
+.cursor-agent-rules/
+
+# Logs
+*.log
+logs/
+
+# OS junk
+*.swp
+*.swo
+~$*
+
+
