@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 
-type RuleScope = 'user' | 'project' | 'preset';
+type RuleScope = 'project' | 'preset';
 
 interface RuleDescriptor {
   id: string; // file path, used as stable identifier
@@ -13,7 +13,6 @@ interface RuleDescriptor {
 }
 
 interface GroupedRules {
-  user: Array<Pick<RuleDescriptor, 'id' | 'title'>>;
   project: Array<Pick<RuleDescriptor, 'id' | 'title'>>;
   presets: Array<Pick<RuleDescriptor, 'id' | 'title'>>;
   projectRulesSupported: boolean;
@@ -26,24 +25,62 @@ class RulesManager {
     this.workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   }
 
-  private getUserDir(): string {
-    return path.join(os.homedir(), '.cursor-agent-rules', 'user');
+  private parseFrontmatter(text: string): { meta: Record<string, string>; body: string } {
+    const match = text.match(/^---\s*\r?\n([\s\S]*?)\r?\n---\s*(?:\r?\n)?/);
+    if (!match) {
+      return { meta: {}, body: text };
+    }
+
+    const metaLines = match[1].split(/\r?\n/);
+    const meta: Record<string, string> = {};
+    for (const line of metaLines) {
+      const idx = line.indexOf(':');
+      if (idx === -1) {
+        continue;
+      }
+      const key = line.slice(0, idx).trim();
+      const value = line.slice(idx + 1).trim();
+      if (key) {
+        meta[key] = value;
+      }
+    }
+
+    const body = text.slice(match[0].length);
+    return { meta, body };
+  }
+
+  private buildFrontmatter(meta: Record<string, string>): string {
+    const lines = Object.entries(meta).map(([key, value]) =>
+      value ? `${key}: ${value}` : `${key}:`
+    );
+    return `---\n${lines.join('\n')}\n---\n\n`;
+  }
+
+  private defaultBody(): string {
+    return '# @agent-rule\n\nDescribe the rule here. This content will be included in your rules context.\n';
+  }
+
+  private normalizeScope(value: string | undefined, fallback: RuleScope): RuleScope {
+    const lower = value?.toLowerCase();
+    return lower === 'project' || lower === 'preset' ? (lower as RuleScope) : fallback;
   }
 
   private getPresetDir(): string {
+    // Local presets managed by Rulebook; Cursor itself ignores this directory.
     return path.join(os.homedir(), '.cursor-agent-rules', 'presets');
   }
 
   private getProjectDir(): string | undefined {
+    // Real Cursor project rules live in .cursor/rules as MDC files.
     if (!this.workspaceRoot) {
       return undefined;
     }
-    return path.join(this.workspaceRoot, '.cursor-agent-rules', 'project');
+    return path.join(this.workspaceRoot, '.cursor', 'rules');
   }
 
   async init(): Promise<void> {
     // Best-effort create; never throw from here so activation always succeeds.
-    const dirs = [this.getUserDir(), this.getPresetDir()];
+    const dirs = [this.getPresetDir()];
     const projectDir = this.getProjectDir();
     if (projectDir) {
       dirs.push(projectDir);
@@ -52,7 +89,7 @@ class RulesManager {
     await Promise.all(
       dirs.map(dir =>
         fs.promises.mkdir(dir, { recursive: true }).catch(err => {
-          console.error('Agent Rules: failed to create rules directory', dir, err);
+          console.error('Rulebook: failed to create rules directory', dir, err);
         })
       )
     );
@@ -105,25 +142,25 @@ class RulesManager {
       return undefined;
     }
 
-    const lines = text.split(/\r?\n/).slice(0, 32);
-    let scope: RuleScope = defaultScope;
-    let title = path.basename(filePath, path.extname(filePath));
+    const { meta, body } = this.parseFrontmatter(text);
 
-    for (const rawLine of lines) {
-      const line = rawLine.trim();
-      const scopeMatch = /^#\s*scope\s*:\s*(user|project|preset)\s*$/i.exec(line);
+    let scope: RuleScope = this.normalizeScope(meta.scope, defaultScope);
+    let title = meta.description?.trim() || path.basename(filePath, path.extname(filePath));
+
+    if (!meta.scope) {
+      const scopeMatch = /^#\s*scope\s*:\s*(project|preset)\s*$/im.exec(body);
       if (scopeMatch) {
-        scope = scopeMatch[1].toLowerCase() as RuleScope;
-        continue;
+        scope = this.normalizeScope(scopeMatch[1], scope);
       }
+    }
 
-      const titleMatch = /^#\s*title\s*:\s*(.+)$/i.exec(line);
+    if (!meta.description) {
+      const titleMatch = /^#\s*title\s*:\s*(.+)$/im.exec(body);
       if (titleMatch) {
         const candidate = titleMatch[1].trim();
         if (candidate.length > 0) {
           title = candidate;
         }
-        continue;
       }
     }
 
@@ -136,21 +173,17 @@ class RulesManager {
   }
 
   private async loadAllRules(): Promise<RuleDescriptor[]> {
-    const [userRules, presetRules, projectRules] = await Promise.all([
-      this.loadRulesFromDir(this.getUserDir(), 'user'),
+    const [presetRules, projectRules] = await Promise.all([
       this.loadRulesFromDir(this.getPresetDir(), 'preset'),
       this.loadRulesFromDir(this.getProjectDir(), 'project')
     ]);
 
-    return [...userRules, ...presetRules, ...projectRules];
+    return [...presetRules, ...projectRules];
   }
 
   async getGroupedRules(): Promise<GroupedRules> {
     const all = await this.loadAllRules();
 
-    const user = all
-      .filter(r => r.scope === 'user')
-      .map(r => ({ id: r.id, title: r.title }));
     const project = all
       .filter(r => r.scope === 'project')
       .map(r => ({ id: r.id, title: r.title }));
@@ -159,7 +192,6 @@ class RulesManager {
       .map(r => ({ id: r.id, title: r.title }));
 
     return {
-      user,
       project,
       presets,
       projectRulesSupported: Boolean(this.workspaceRoot)
@@ -168,8 +200,6 @@ class RulesManager {
 
   private getDirectoryForScope(scope: RuleScope): string | undefined {
     switch (scope) {
-      case 'user':
-        return this.getUserDir();
       case 'preset':
         return this.getPresetDir();
       case 'project':
@@ -201,23 +231,27 @@ class RulesManager {
     });
 
     const slug = this.slugify(title || 'rule');
-    let filePath = path.join(dir, `${slug}.md`);
+    const ext = scope === 'project' ? '.mdc' : '.md';
+    let filePath = path.join(dir, `${slug}${ext}`);
     let counter = 1;
     while (fs.existsSync(filePath)) {
-      filePath = path.join(dir, `${slug}-${counter}.md`);
+      filePath = path.join(dir, `${slug}-${counter}${ext}`);
       counter += 1;
     }
 
-    const headerLines = [
-      '# @agent-rule',
-      `# title: ${title}`,
-      `# scope: ${scope}`,
-      '',
-      'Describe the rule here. This content will be included in your .cursorrules files.',
-      ''
-    ];
+    const metadata: Record<string, string> = {
+      description: title,
+      scope
+    };
 
-    await fs.promises.writeFile(filePath, headerLines.join('\n'), 'utf8');
+    if (scope === 'project') {
+      metadata.globs = '';
+      metadata.alwaysApply = 'true';
+    }
+
+    const content = `${this.buildFrontmatter(metadata)}${this.defaultBody()}`;
+
+    await fs.promises.writeFile(filePath, content, 'utf8');
 
     const descriptor = await this.parseRuleFile(filePath, scope);
     if (!descriptor) {
@@ -247,59 +281,82 @@ class RulesManager {
     return all.find(r => r.id === id);
   }
 
+  async duplicateRuleToScope(sourceId: string, targetScope: RuleScope): Promise<RuleDescriptor> {
+    const source = await this.findRuleById(sourceId);
+    if (!source) {
+      throw new Error('Rule not found.');
+    }
+
+    let content: string;
+    try {
+      content = await fs.promises.readFile(source.filePath, 'utf8');
+    } catch {
+      throw new Error('Failed to read rule file.');
+    }
+
+    const { meta, body } = this.parseFrontmatter(content);
+    const normalizedBody = body.replace(/^\s*/, '');
+
+    const newMeta: Record<string, string> = {
+      ...meta,
+      description: meta.description || source.title,
+      scope: targetScope
+    };
+
+    if (targetScope === 'project') {
+      newMeta.globs = newMeta.globs ?? '';
+      newMeta.alwaysApply = newMeta.alwaysApply ?? 'true';
+    } else {
+      delete newMeta.globs;
+      delete newMeta.alwaysApply;
+    }
+
+    const dir = this.getDirectoryForScope(targetScope);
+    if (!dir) {
+      throw new Error('Open a workspace folder to create project rules.');
+    }
+
+    await fs.promises.mkdir(dir, { recursive: true }).catch(() => {
+      // best-effort
+    });
+
+    const slug = this.slugify(source.title || path.basename(source.filePath));
+    const ext = targetScope === 'project' ? '.mdc' : '.md';
+    let destPath = path.join(dir, `${slug}${ext}`);
+    let counter = 1;
+    while (fs.existsSync(destPath)) {
+      destPath = path.join(dir, `${slug}-${counter}${ext}`);
+      counter += 1;
+    }
+
+    const finalContent = `${this.buildFrontmatter(newMeta)}${normalizedBody.length > 0 ? normalizedBody : this.defaultBody()
+      }`;
+
+    await fs.promises.writeFile(destPath, finalContent, 'utf8');
+
+    const descriptor = await this.parseRuleFile(destPath, targetScope);
+    if (!descriptor) {
+      throw new Error('Failed to create duplicated rule.');
+    }
+
+    await this.syncCursorrules();
+    return descriptor;
+  }
+
   async syncCursorrules(): Promise<void> {
-    const all = await this.loadAllRules();
-
-    const userRules = all.filter(r => r.scope === 'user');
-    const projectRules = all.filter(r => r.scope === 'project');
-
-    // User-level .cursorrules
-    if (userRules.length > 0) {
-      const userBlocks = await Promise.all(
-        userRules.map(async r => {
-          try {
-            const text = await fs.promises.readFile(r.filePath, 'utf8');
-            return text.trim();
-          } catch {
-            return '';
-          }
-        })
-      );
-      const userPath = path.join(os.homedir(), '.cursorrules');
-      await fs.promises.writeFile(userPath, userBlocks.filter(Boolean).join('\n\n'), 'utf8');
-    }
-
-    // Project-level .cursorrules
-    if (this.workspaceRoot && projectRules.length > 0) {
-      const projectBlocks = await Promise.all(
-        projectRules.map(async r => {
-          try {
-            const text = await fs.promises.readFile(r.filePath, 'utf8');
-            return text.trim();
-          } catch {
-            return '';
-          }
-        })
-      );
-      const projectPath = path.join(this.workspaceRoot, '.cursorrules');
-      await fs.promises.writeFile(
-        projectPath,
-        projectBlocks.filter(Boolean).join('\n\n'),
-        'utf8'
-      );
-    }
+    // Legacy .cursorrules support is deprecated; no-op for now.
   }
 }
 
 /**
- * View provider for the Agent Rules sidebar.
- * Renders lists of user, project, and preset rules, and lets the user add/edit/delete them.
+ * View provider for the rulebook sidebar.
+ * Renders lists of project rules and presets, and lets the user add/edit/delete them.
  */
 class AgentRulesViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'agentRulesView';
   private view?: vscode.WebviewView;
 
-  constructor(private readonly rulesManager: RulesManager) {}
+  constructor(private readonly rulesManager: RulesManager) { }
 
   resolveWebviewView(
     webviewView: vscode.WebviewView,
@@ -330,6 +387,30 @@ class AgentRulesViewProvider implements vscode.WebviewViewProvider {
         }
         case 'deleteRule': {
           await this.handleDeleteRule(message.id as string);
+          break;
+        }
+        case 'projectToPreset': {
+          try {
+            await this.rulesManager.duplicateRuleToScope(message.id as string, 'preset');
+            await this.postState();
+          } catch (err) {
+            const message =
+              err instanceof Error ? err.message : 'Failed to save rule as preset.';
+            vscode.window.showErrorMessage(message);
+            console.error('Rulebook: failed to duplicate rule to preset', err);
+          }
+          break;
+        }
+        case 'presetToProject': {
+          try {
+            await this.rulesManager.duplicateRuleToScope(message.id as string, 'project');
+            await this.postState();
+          } catch (err) {
+            const message =
+              err instanceof Error ? err.message : 'Failed to add preset to project.';
+            vscode.window.showErrorMessage(message);
+            console.error('Rulebook: failed to duplicate preset to project', err);
+          }
           break;
         }
         case 'toggleSection': {
@@ -363,7 +444,7 @@ class AgentRulesViewProvider implements vscode.WebviewViewProvider {
       const message =
         err instanceof Error ? err.message : 'Failed to create rule. See console for details.';
       vscode.window.showErrorMessage(message);
-      console.error('Agent Rules: failed to create rule', err);
+      console.error('Rulebook: failed to create rule', err);
     }
   }
 
@@ -377,7 +458,7 @@ class AgentRulesViewProvider implements vscode.WebviewViewProvider {
       const message =
         err instanceof Error ? err.message : 'Failed to open rule. See console for details.';
       vscode.window.showErrorMessage(message);
-      console.error('Agent Rules: failed to open rule', err);
+      console.error('Rulebook: failed to open rule', err);
     }
   }
 
@@ -405,7 +486,7 @@ class AgentRulesViewProvider implements vscode.WebviewViewProvider {
       const message =
         err instanceof Error ? err.message : 'Failed to delete rule. See console for details.';
       vscode.window.showErrorMessage(message);
-      console.error('Agent Rules: failed to delete rule', err);
+      console.error('Rulebook: failed to delete rule', err);
     }
   }
 
@@ -428,21 +509,20 @@ class AgentRulesViewProvider implements vscode.WebviewViewProvider {
 
         body {
           margin: 0;
-          padding: 4px 0 8px 0;
+          padding: 0;
           font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
           font-size: 13px;
           color: var(--vscode-foreground);
-          background-color: transparent;
+          background-color: var(--vscode-sideBar-background, transparent);
         }
 
         .sections {
           display: flex;
           flex-direction: column;
-          gap: 2px;
         }
 
         .section {
-          padding: 2px 8px 4px 8px;
+          margin: 0;
         }
 
         .section-header {
@@ -450,7 +530,16 @@ class AgentRulesViewProvider implements vscode.WebviewViewProvider {
           align-items: center;
           justify-content: space-between;
           cursor: default;
-          padding: 2px 0;
+          padding: 0 8px;
+          height: 22px;
+          line-height: 22px;
+          color: var(--vscode-sideBarSectionHeader-foreground, var(--vscode-foreground));
+          background-color: var(--vscode-sideBarSectionHeader-background, transparent);
+          border-top: 1px solid var(--vscode-sideBarSectionHeader-border, transparent);
+        }
+
+        .section-header:hover {
+          background-color: var(--vscode-list-hoverBackground);
         }
 
         .section-header-left {
@@ -477,17 +566,13 @@ class AgentRulesViewProvider implements vscode.WebviewViewProvider {
         .section-subtitle {
           font-size: 11px;
           opacity: 0.65;
-        }
-
-        .section-header-text {
-          display: flex;
-          flex-direction: column;
+          margin-bottom: 2px;
         }
 
         .header-icon-button {
           border: none;
           background: transparent;
-          padding: 2px 4px;
+          padding: 0 2px;
           cursor: pointer;
           color: var(--vscode-icon-foreground, var(--vscode-foreground));
           display: inline-flex;
@@ -506,8 +591,7 @@ class AgentRulesViewProvider implements vscode.WebviewViewProvider {
         }
 
         .section-body {
-          margin-left: 18px;
-          padding: 2px 0 4px 0;
+          padding: 4px 8px 4px 26px;
         }
 
         .section-collapsed .section-body {
@@ -588,7 +672,6 @@ class AgentRulesViewProvider implements vscode.WebviewViewProvider {
       const vscode = acquireVsCodeApi();
 
       const state = {
-        user: [],
         project: [],
         presets: [],
         projectRulesSupported: true
@@ -614,7 +697,7 @@ class AgentRulesViewProvider implements vscode.WebviewViewProvider {
 
           const titleSpan = document.createElement('span');
           titleSpan.className = 'rule-title';
-          titleSpan.textContent = rule.title;
+          titleSpan.textContent = rule.title || 'Untitled rule';
           li.appendChild(titleSpan);
 
           const actions = document.createElement('div');
@@ -640,9 +723,32 @@ class AgentRulesViewProvider implements vscode.WebviewViewProvider {
 
           actions.appendChild(editBtn);
           actions.appendChild(deleteBtn);
+
+          if (scope === 'project') {
+            const toPresetBtn = document.createElement('button');
+            toPresetBtn.className = 'icon-button';
+            toPresetBtn.title = 'Save as preset';
+            toPresetBtn.innerHTML = '<span class="material-icons-outlined">post_add</span>';
+            toPresetBtn.addEventListener('click', (event) => {
+              event.stopPropagation();
+              vscode.postMessage({ command: 'projectToPreset', id: rule.id });
+            });
+            actions.appendChild(toPresetBtn);
+          } else if (scope === 'presets') {
+            const toProjectBtn = document.createElement('button');
+            toProjectBtn.className = 'icon-button';
+            toProjectBtn.title = 'Add to project rules';
+            toProjectBtn.innerHTML = '<span class="material-icons-outlined">publish</span>';
+            toProjectBtn.addEventListener('click', (event) => {
+              event.stopPropagation();
+              vscode.postMessage({ command: 'presetToProject', id: rule.id });
+            });
+            actions.appendChild(toProjectBtn);
+          }
+
           li.appendChild(actions);
 
-          li.addEventListener('dblclick', () => {
+          li.addEventListener('click', () => {
             vscode.postMessage({ command: 'editRule', id: rule.id });
           });
 
@@ -651,7 +757,6 @@ class AgentRulesViewProvider implements vscode.WebviewViewProvider {
       }
 
       function renderAll() {
-        renderSection('user', state.user);
         renderSection('project', state.project);
         renderSection('presets', state.presets);
 
@@ -685,7 +790,6 @@ class AgentRulesViewProvider implements vscode.WebviewViewProvider {
       window.addEventListener('message', event => {
         const message = event.data;
         if (message.type === 'rulesState') {
-          state.user = message.state.user || [];
           state.project = message.state.project || [];
           state.presets = message.state.presets || [];
           state.projectRulesSupported = !!message.state.projectRulesSupported;
@@ -706,10 +810,6 @@ class AgentRulesViewProvider implements vscode.WebviewViewProvider {
       }
 
       document.addEventListener('DOMContentLoaded', () => {
-        document.getElementById('add-user-rule')?.addEventListener('click', (event) => {
-          event.stopPropagation();
-          handleAdd('user');
-        });
         document.getElementById('add-project-rule')?.addEventListener('click', (event) => {
           event.stopPropagation();
           handleAdd('project');
@@ -750,38 +850,18 @@ class AgentRulesViewProvider implements vscode.WebviewViewProvider {
       </head>
       <body>
         <div class="sections">
-          <div class="section" data-scope="user">
-            <div class="section-header" data-scope="user">
-              <div class="section-header-left">
-                <span class="chevron">▾</span>
-                <div class="section-header-text">
-                  <div class="section-title">User Rules</div>
-                  <div class="section-subtitle">Applied across all workspaces.</div>
-                </div>
-              </div>
-              <button id="add-user-rule" class="header-icon-button" title="Add user rule">
-                <span class="material-icons-outlined">add</span>
-              </button>
-            </div>
-            <div class="section-body">
-              <ul id="user-rules" class="rules-list"></ul>
-            </div>
-          </div>
-
           <div class="section" data-scope="project">
             <div class="section-header" data-scope="project">
               <div class="section-header-left">
                 <span class="chevron">▾</span>
-                <div class="section-header-text">
-                  <div class="section-title">Project Rules</div>
-                  <div id="project-subtitle" class="section-subtitle">Applied only to this workspace.</div>
-                </div>
+                <div class="section-title">Project Rules</div>
               </div>
               <button id="add-project-rule" class="header-icon-button" title="Add project rule">
                 <span class="material-icons-outlined">add</span>
               </button>
             </div>
             <div class="section-body">
+              <div id="project-subtitle" class="section-subtitle">Applied only to this workspace.</div>
               <ul id="project-rules" class="rules-list"></ul>
             </div>
           </div>
@@ -790,16 +870,14 @@ class AgentRulesViewProvider implements vscode.WebviewViewProvider {
             <div class="section-header" data-scope="presets">
               <div class="section-header-left">
                 <span class="chevron">▾</span>
-                <div class="section-header-text">
-                  <div class="section-title">Presets</div>
-                  <div class="section-subtitle">Saved rules that are not currently applied.</div>
-                </div>
+                <div class="section-title">Presets</div>
               </div>
               <button id="add-preset-rule" class="header-icon-button" title="Add preset rule">
                 <span class="material-icons-outlined">add</span>
               </button>
             </div>
             <div class="section-body">
+              <div class="section-subtitle">Saved rules that are not currently applied.</div>
               <ul id="presets-rules" class="rules-list"></ul>
             </div>
           </div>
@@ -833,9 +911,9 @@ export function activate(context: vscode.ExtensionContext): void {
   // Initialise rule directories in the background; UI will still appear even if this fails.
   rulesManager.init().catch(err => {
     const message =
-      err instanceof Error ? err.message : 'Unknown error during Agent Rules initialisation.';
-    console.error('Agent Rules: init failed', err);
-    vscode.window.showErrorMessage(`Agent Rules extension initialisation failed: ${message}`);
+      err instanceof Error ? err.message : 'Unknown error during Rulebook initialisation.';
+    console.error('Rulebook: init failed', err);
+    vscode.window.showErrorMessage(`Rulebook extension initialisation failed: ${message}`);
   });
 }
 

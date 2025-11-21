@@ -1,12 +1,13 @@
 {
   "name": "rulebook-agent-rule-manager",
   "displayName": "Rulebook - Agent Rule Manager",
-  "description": "Extension for Visual Studio Code and Cursor to manage, save, and easily access rules for IDE agents.",
-  "version": "0.0.3",
+  "description": "Cursor-only extension for managing project rules and presets.",
+  "version": "0.0.4",
   "publisher": "jasonshaw0",
+  "icon": "media/rulebook-logo-nobg-blue.png",
   "repository": {
     "type": "git",
-    "url": "https://github.com/your-username/rulebook-agent-rule-manager"
+    "url": "https://github.com/jasonshaw0/Rulebook"
   },
   "engines": {
     "vscode": "^1.80.0"
@@ -23,8 +24,8 @@
       "activitybar": [
         {
           "id": "agentRules",
-          "title": "Agent Rules",
-          "icon": "media/ai-mi-algorithm.svg"
+          "title": "Rulebook - Agent Rule Manager",
+          "icon": "media/rulebook-icon.svg"
         }
       ]
     },
@@ -32,7 +33,7 @@
       "agentRules": [
         {
           "id": "agentRulesView",
-          "name": "Agent Rules",
+          "name": "Rulebook - Agent Rule Manager",
           "type": "webview"
         }
       ]
