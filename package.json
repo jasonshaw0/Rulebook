@@ -17,7 +17,7 @@
   ],
   "main": "./out/extension.js",
   "activationEvents": [
-    "onView:agentRulesView"
+    
   ],
   "contributes": {
     "viewsContainers": {
@@ -32,11 +32,22 @@
     "views": {
       "agentRules": [
         {
+          "icon": "media/rulebook-icon.svg",
           "id": "agentRulesView",
           "name": "Rulebook",
           "type": "webview"
         }
       ]
+    },
+    "configuration": {
+      "title": "Rulebook",
+      "properties": {
+        "rulebook.rulesDirectory": {
+          "type": "string",
+          "default": ".rules",
+          "description": "Relative path to the directory where project rules are stored."
+        }
+      }
     }
   },
   "license": "MIT",
@@ -49,5 +60,11 @@
     "@types/node": "^22.7.4",
     "@types/vscode": "^1.80.0",
     "typescript": "^5.5.4"
+  },
+  "optionalDependencies": {
+    "bufferutil": "^4.0.9"
+  },
+  "dependencies": {
+    "-": "^0.0.1"
   }
 }

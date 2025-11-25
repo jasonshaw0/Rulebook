@@ -1,415 +1,18 @@
 import * as vscode from 'vscode';
-import * as fs from 'fs';
 import * as path from 'path';
-import * as os from 'os';
+import { RuleDescriptor, RulesManager } from './RulesManager';
 
-type RuleScope = 'project' | 'preset';
-type RuleSource = 'project' | 'userPreset' | 'discover';
+export type RuleScope = 'project' | 'preset';
+export type RuleSource = 'project' | 'userPreset';
 
-interface RuleDescriptor {
-  id: string; // file path, used as stable identifier
-  title: string;
-  scope: RuleScope;
-  filePath: string;
-  source: RuleSource;
-  tag?: string; // canonical tag name without leading '#'
-}
-
-interface GroupedRules {
+export interface GroupedRules {
   project: Array<Pick<RuleDescriptor, 'id' | 'title' | 'tag'>>;
   presets: Array<Pick<RuleDescriptor, 'id' | 'title' | 'tag'>>;
-  discover: Array<Pick<RuleDescriptor, 'id' | 'title' | 'tag'>>;
   allTags: string[];
   projectRulesSupported: boolean;
   projectRulesDirExists: boolean;
   projectRulesPath: string | null;
   workspaceName: string | null;
-}
-
-class RulesManager {
-  private readonly workspaceRoot?: string;
-  private readonly extensionPath: string;
-
-  constructor(context: vscode.ExtensionContext) {
-    this.workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-    this.extensionPath = context.extensionPath;
-  }
-
-  private parseFrontmatter(text: string): { meta: Record<string, string>; body: string } {
-    const match = text.match(/^---\s*\r?\n([\s\S]*?)\r?\n---\s*(?:\r?\n)?/);
-    if (!match) {
-      return { meta: {}, body: text };
-    }
-
-    const metaLines = match[1].split(/\r?\n/);
-    const meta: Record<string, string> = {};
-    for (const line of metaLines) {
-      const idx = line.indexOf(':');
-      if (idx === -1) {
-        continue;
-      }
-      const key = line.slice(0, idx).trim();
-      const value = line.slice(idx + 1).trim();
-      if (key) {
-        meta[key] = value;
-      }
-    }
-
-    const body = text.slice(match[0].length);
-    return { meta, body };
-  }
-
-  private buildFrontmatter(meta: Record<string, string>): string {
-    const lines = Object.entries(meta).map(([key, value]) =>
-      value ? `${key}: ${value}` : `${key}:`
-    );
-    return `---\n${lines.join('\n')}\n---\n\n`;
-  }
-
-  private defaultBody(): string {
-    return '# @agent-rule\n\nDescribe the rule here. This content will be included in your rules context.\n';
-  }
-
-  private normalizeScope(value: string | undefined, fallback: RuleScope): RuleScope {
-    const lower = value?.toLowerCase();
-    return lower === 'project' || lower === 'preset' ? (lower as RuleScope) : fallback;
-  }
-
-  private getDiscoverDir(): string {
-    return path.join(this.extensionPath, 'discover');
-  }
-
-  private getPresetDir(): string {
-    // Local presets managed by Rulebook; Cursor itself ignores this directory.
-    return path.join(os.homedir(), '.cursor-agent-rules', 'presets');
-  }
-
-  private getProjectDir(): string | undefined {
-    // Real Cursor project rules live in .cursor/rules as MDC files.
-    if (!this.workspaceRoot) {
-      return undefined;
-    }
-    return path.join(this.workspaceRoot, '.cursor', 'rules');
-  }
-
-  async init(): Promise<void> {
-    // Best-effort create; never throw from here so activation always succeeds.
-    const dirs = [this.getPresetDir()];
-    await Promise.all(
-      dirs.map(dir =>
-        fs.promises.mkdir(dir, { recursive: true }).catch(err => {
-          console.error('Rulebook: failed to create rules directory', dir, err);
-        })
-      )
-    );
-  }
-
-  private async loadRulesFromDir(
-    dir: string | undefined,
-    defaultScope: RuleScope,
-    source: RuleSource
-  ): Promise<RuleDescriptor[]> {
-    if (!dir) {
-      return [];
-    }
-
-    let entries: string[];
-    try {
-      entries = await fs.promises.readdir(dir);
-    } catch {
-      return [];
-    }
-
-    const rules: RuleDescriptor[] = [];
-    for (const name of entries) {
-      const fullPath = path.join(dir, name);
-      let stat: fs.Stats;
-      try {
-        stat = await fs.promises.stat(fullPath);
-      } catch {
-        continue;
-      }
-      if (!stat.isFile()) {
-        continue;
-      }
-      const parsed = await this.parseRuleFile(fullPath, defaultScope);
-      if (parsed) {
-        rules.push({ ...parsed, source });
-      }
-    }
-
-    return rules;
-  }
-
-  private async parseRuleFile(
-    filePath: string,
-    defaultScope: RuleScope
-  ): Promise<Omit<RuleDescriptor, 'source'> | undefined> {
-    let text: string;
-    try {
-      text = await fs.promises.readFile(filePath, 'utf8');
-    } catch {
-      return undefined;
-    }
-
-    const { meta, body } = this.parseFrontmatter(text);
-
-    let scope: RuleScope = this.normalizeScope(meta.scope, defaultScope);
-    let title = meta.description?.trim() || path.basename(filePath, path.extname(filePath));
-
-    let tag: string | undefined;
-    if (meta.tag) {
-      let raw = meta.tag.split(',')[0].trim();
-      if (raw.startsWith('#')) {
-        raw = raw.slice(1);
-      }
-      if (raw) {
-        tag = raw;
-      }
-    }
-
-    if (!meta.scope) {
-      const scopeMatch = /^#\s*scope\s*:\s*(project|preset)\s*$/im.exec(body);
-      if (scopeMatch) {
-        scope = this.normalizeScope(scopeMatch[1], scope);
-      }
-    }
-
-    if (!meta.description) {
-      const titleMatch = /^#\s*title\s*:\s*(.+)$/im.exec(body);
-      if (titleMatch) {
-        const candidate = titleMatch[1].trim();
-        if (candidate.length > 0) {
-          title = candidate;
-        }
-      }
-    }
-
-    return {
-      id: filePath,
-      filePath,
-      scope,
-      title,
-      tag
-    };
-  }
-
-  private async loadAllRules(): Promise<RuleDescriptor[]> {
-    const [presetRules, projectRules, discoverRules] = await Promise.all([
-      this.loadRulesFromDir(this.getPresetDir(), 'preset', 'userPreset'),
-      this.loadRulesFromDir(this.getProjectDir(), 'project', 'project'),
-      this.loadRulesFromDir(this.getDiscoverDir(), 'preset', 'discover')
-    ]);
-
-    return [...presetRules, ...projectRules, ...discoverRules];
-  }
-
-  async getGroupedRules(): Promise<GroupedRules> {
-    const all = await this.loadAllRules();
-    const projectDir = this.getProjectDir();
-    const projectRulesDirExists = projectDir ? fs.existsSync(projectDir) : false;
-    const workspaceName = this.workspaceRoot ? path.basename(this.workspaceRoot) : null;
-
-    const project = all
-      .filter(r => r.source === 'project')
-      .map(r => ({ id: r.id, title: r.title, tag: r.tag }));
-    const presets = all
-      .filter(r => r.source === 'userPreset')
-      .map(r => ({ id: r.id, title: r.title, tag: r.tag }));
-    const discover = all
-      .filter(r => r.source === 'discover')
-      .map(r => ({ id: r.id, title: r.title, tag: r.tag }));
-
-    const tagSet = new Set<string>();
-    for (const rule of [...project, ...presets, ...discover]) {
-      if (rule.tag) {
-        tagSet.add(rule.tag);
-      }
-    }
-
-    let projectRulesPath: string | null = null;
-    if (projectDir && this.workspaceRoot) {
-      projectRulesPath = path.relative(this.workspaceRoot, projectDir).replace(/\\/g, '/');
-    }
-
-    return {
-      project,
-      presets,
-      discover,
-      allTags: Array.from(tagSet),
-      projectRulesSupported: Boolean(this.workspaceRoot),
-      projectRulesDirExists,
-      projectRulesPath,
-      workspaceName
-    };
-  }
-
-  private getDirectoryForScope(scope: RuleScope): string | undefined {
-    switch (scope) {
-      case 'preset':
-        return this.getPresetDir();
-      case 'project':
-        return this.getProjectDir();
-      default:
-        return undefined;
-    }
-  }
-
-  private slugify(title: string): string {
-    const base =
-      title
-        .toLowerCase()
-        .trim()
-        .replace(/[^a-z0-9]+/g, '-')
-        .replace(/^-+|-+$/g, '')
-        .slice(0, 50) || 'rule';
-    return base;
-  }
-
-  async createRule(scope: RuleScope, title: string): Promise<RuleDescriptor> {
-    const dir = this.getDirectoryForScope(scope);
-    if (!dir) {
-      throw new Error('Open a workspace folder to create project rules.');
-    }
-
-    await fs.promises.mkdir(dir, { recursive: true }).catch(() => {
-      // best-effort
-    });
-
-    const slug = this.slugify(title || 'rule');
-    const ext = scope === 'project' ? '.mdc' : '.md';
-    let filePath = path.join(dir, `${slug}${ext}`);
-    let counter = 1;
-    while (fs.existsSync(filePath)) {
-      filePath = path.join(dir, `${slug}-${counter}${ext}`);
-      counter += 1;
-    }
-
-    const metadata: Record<string, string> = {
-      description: title,
-      scope
-    };
-
-    if (scope === 'project') {
-      metadata.globs = '';
-      metadata.alwaysApply = 'true';
-    }
-
-    const content = `${this.buildFrontmatter(metadata)}${this.defaultBody()}`;
-
-    await fs.promises.writeFile(filePath, content, 'utf8');
-
-    const parsed = await this.parseRuleFile(filePath, scope);
-    if (!parsed) {
-      throw new Error('Failed to create rule file.');
-    }
-
-    const descriptor: RuleDescriptor = {
-      ...parsed,
-      source: scope === 'project' ? 'project' : 'userPreset'
-    };
-
-    await this.syncCursorrules();
-    return descriptor;
-  }
-
-  async deleteRule(filePath: string): Promise<void> {
-    try {
-      await fs.promises.unlink(filePath);
-    } catch {
-      // Ignore
-    }
-    await this.syncCursorrules();
-  }
-
-  async openRule(filePath: string): Promise<void> {
-    const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(filePath));
-    await vscode.window.showTextDocument(doc, { preview: false });
-  }
-
-  async findRuleById(id: string): Promise<RuleDescriptor | undefined> {
-    const all = await this.loadAllRules();
-    return all.find(r => r.id === id);
-  }
-
-  async ensureProjectRulesDir(): Promise<void> {
-    const dir = this.getProjectDir();
-    if (!dir) {
-      throw new Error('Open a workspace folder to create project rules.');
-    }
-    await fs.promises.mkdir(dir, { recursive: true });
-  }
-
-  async duplicateRuleToScope(sourceId: string, targetScope: RuleScope): Promise<RuleDescriptor> {
-    const source = await this.findRuleById(sourceId);
-    if (!source) {
-      throw new Error('Rule not found.');
-    }
-
-    let content: string;
-    try {
-      content = await fs.promises.readFile(source.filePath, 'utf8');
-    } catch {
-      throw new Error('Failed to read rule file.');
-    }
-
-    const { meta, body } = this.parseFrontmatter(content);
-    const normalizedBody = body.replace(/^\s*/, '');
-
-    const newMeta: Record<string, string> = {
-      ...meta,
-      description: meta.description || source.title,
-      scope: targetScope
-    };
-
-    if (targetScope === 'project') {
-      newMeta.globs = newMeta.globs ?? '';
-      newMeta.alwaysApply = newMeta.alwaysApply ?? 'true';
-    } else {
-      delete newMeta.globs;
-      delete newMeta.alwaysApply;
-    }
-
-    const dir = this.getDirectoryForScope(targetScope);
-    if (!dir) {
-      throw new Error('Open a workspace folder to create project rules.');
-    }
-
-    await fs.promises.mkdir(dir, { recursive: true }).catch(() => {
-      // best-effort
-    });
-
-    const slug = this.slugify(source.title || path.basename(source.filePath));
-    const ext = targetScope === 'project' ? '.mdc' : '.md';
-    let destPath = path.join(dir, `${slug}${ext}`);
-    let counter = 1;
-    while (fs.existsSync(destPath)) {
-      destPath = path.join(dir, `${slug}-${counter}${ext}`);
-      counter += 1;
-    }
-
-    const finalContent = `${this.buildFrontmatter(newMeta)}${normalizedBody.length > 0 ? normalizedBody : this.defaultBody()
-      }`;
-
-    await fs.promises.writeFile(destPath, finalContent, 'utf8');
-
-    const parsed = await this.parseRuleFile(destPath, targetScope);
-    if (!parsed) {
-      throw new Error('Failed to create duplicated rule.');
-    }
-
-    const descriptor: RuleDescriptor = {
-      ...parsed,
-      source: targetScope === 'project' ? 'project' : 'userPreset'
-    };
-
-    await this.syncCursorrules();
-    return descriptor;
-  }
-
-  async syncCursorrules(): Promise<void> {
-    // Legacy .cursorrules support is deprecated; no-op for now.
-  }
 }
 
 /**
@@ -493,10 +96,6 @@ class AgentRulesViewProvider implements vscode.WebviewViewProvider {
             vscode.window.showErrorMessage(message);
             console.error('Rulebook: failed to create project rules directory', err);
           }
-          break;
-        }
-        case 'refreshDiscover': {
-          await this.postState();
           break;
         }
         default:
@@ -694,10 +293,6 @@ class AgentRulesViewProvider implements vscode.WebviewViewProvider {
           margin-bottom: 1px;
         }
 
-        .section[data-scope="discover"] .section-subtitle {
-          margin-bottom: 6px;
-        }
-
         .header-icon-button {
           border: none;
           background: transparent;
@@ -880,19 +475,16 @@ class AgentRulesViewProvider implements vscode.WebviewViewProvider {
           opacity: 0.6;
         }
 
-        .presets-list,
-        .discover-list {
+        .presets-list {
           border-top: 1px solid rgba(255, 255, 255, 0.14);
           margin-top: 2px;
         }
 
-        .presets-list .rule-item,
-        .discover-list .rule-item {
+        .presets-list .rule-item {
           border-bottom: 1px solid rgba(255, 255, 255, 0.14);
         }
 
-        .presets-list .rule-item:last-child,
-        .discover-list .rule-item:last-child {
+        .presets-list .rule-item:last-child {
           border-bottom: none;
         }
       </style>
@@ -904,12 +496,10 @@ class AgentRulesViewProvider implements vscode.WebviewViewProvider {
       const state = {
         project: [],
         presets: [],
-        discover: [],
         allTags: [],
         projectRulesSupported: true,
         projectRulesDirExists: false,
         projectRulesPath: null,
-        selectedDiscoverTag: null,
         tagColors: {},
         workspaceName: null
       };
@@ -1029,132 +619,9 @@ class AgentRulesViewProvider implements vscode.WebviewViewProvider {
         }
       }
 
-      function renderDiscover() {
-        const list = document.getElementById('discover-rules');
-        const tagBar = document.getElementById('discover-tags');
-        if (!list || !tagBar) {
-          return;
-        }
-
-        // Tag tabs
-        tagBar.innerHTML = '';
-        let tags = Array.from(state.allTags || []);
-        if (state.selectedDiscoverTag) {
-          tags = tags.sort((a, b) => {
-            if (a === state.selectedDiscoverTag) return -1;
-            if (b === state.selectedDiscoverTag) return 1;
-            return a.localeCompare(b);
-          });
-        }
-
-        tags.forEach(tag => {
-          const pill = document.createElement('span');
-          pill.className = 'tag-tab';
-          const color = getTagColor(tag);
-          if (color) {
-            pill.style.backgroundColor = color;
-          }
-
-          if (tag === state.selectedDiscoverTag) {
-            pill.classList.add('selected');
-            const close = document.createElement('span');
-            close.className = 'tag-tab-close';
-            close.textContent = '×';
-            pill.appendChild(close);
-          }
-
-          const label = document.createElement('span');
-          label.textContent =
-            '#' + tag;
-          pill.appendChild(label);
-
-          pill.addEventListener('click', (event) => {
-            event.stopPropagation();
-            if (tag === state.selectedDiscoverTag) {
-              state.selectedDiscoverTag = null;
-            } else {
-              state.selectedDiscoverTag = tag;
-            }
-            renderDiscover();
-          });
-
-          tagBar.appendChild(pill);
-        });
-
-        // List of discover rules
-        list.innerHTML = '';
-        let rules = state.discover || [];
-        if (state.selectedDiscoverTag) {
-          rules = rules.filter(r => r.tag === state.selectedDiscoverTag);
-        }
-
-        if (!rules.length) {
-          const empty = document.createElement('div');
-          empty.className = 'empty-text';
-          empty.textContent = 'No rules yet.';
-          list.appendChild(empty);
-          return;
-        }
-
-        for (const rule of rules) {
-          const li = document.createElement('li');
-          li.className = 'rule-item';
-
-          const left = document.createElement('div');
-          left.className = 'rule-left';
-
-          const titleSpan = document.createElement('span');
-          titleSpan.className = 'rule-title';
-          titleSpan.textContent = rule.title || 'Untitled rule';
-          left.appendChild(titleSpan);
-
-          if (rule.tag) {
-            const tagSpan = document.createElement('span');
-            tagSpan.className = 'tag-pill';
-            tagSpan.textContent = '#' + rule.tag;
-            const color = getTagColor(rule.tag);
-            if (color) {
-              tagSpan.style.color = color;
-            }
-            left.appendChild(tagSpan);
-          }
-
-          li.appendChild(left);
-
-          const actions = document.createElement('div');
-          actions.className = 'rule-actions';
-
-          const toPresetBtn = document.createElement('button');
-          toPresetBtn.className = 'icon-button';
-          toPresetBtn.title = 'Save as user preset';
-          toPresetBtn.innerHTML = '<span class="material-icons-outlined">post_add</span>';
-          toPresetBtn.addEventListener('click', (event) => {
-            event.stopPropagation();
-            vscode.postMessage({ command: 'projectToPreset', id: rule.id });
-          });
-
-          const toProjectBtn = document.createElement('button');
-          toProjectBtn.className = 'icon-button';
-          toProjectBtn.title = 'Add to project rules';
-          toProjectBtn.innerHTML = '<span class="material-icons-outlined">publish</span>';
-          toProjectBtn.addEventListener('click', (event) => {
-            event.stopPropagation();
-            vscode.postMessage({ command: 'presetToProject', id: rule.id });
-          });
-
-          actions.appendChild(toPresetBtn);
-          actions.appendChild(toProjectBtn);
-
-          li.appendChild(actions);
-
-          list.appendChild(li);
-        }
-      }
-
       function renderAll() {
         renderSection('project', state.project);
         renderSection('presets', state.presets);
-        renderDiscover();
 
         const projectSection = document.querySelector('[data-scope="project"]');
         const projectSubtitle = document.getElementById('project-subtitle');
@@ -1225,7 +692,6 @@ class AgentRulesViewProvider implements vscode.WebviewViewProvider {
         if (message.type === 'rulesState') {
           state.project = message.state.project || [];
           state.presets = message.state.presets || [];
-          state.discover = message.state.discover || [];
           state.allTags = message.state.allTags || [];
           state.projectRulesSupported = !!message.state.projectRulesSupported;
           state.projectRulesDirExists = !!message.state.projectRulesDirExists;
@@ -1259,10 +725,6 @@ class AgentRulesViewProvider implements vscode.WebviewViewProvider {
         document.getElementById('project-create-dir')?.addEventListener('click', (event) => {
           event.stopPropagation();
           vscode.postMessage({ command: 'createProjectRulesDir' });
-        });
-        document.getElementById('refresh-discover')?.addEventListener('click', (event) => {
-          event.stopPropagation();
-          vscode.postMessage({ command: 'refreshDiscover' });
         });
 
         document.querySelectorAll('.section-header').forEach(header => {
@@ -1330,25 +792,6 @@ class AgentRulesViewProvider implements vscode.WebviewViewProvider {
               <ul id="presets-rules" class="rules-list presets-list"></ul>
             </div>
           </div>
-
-          <div class="section" data-scope="discover">
-            <div class="section-header" data-scope="discover">
-              <div class="section-header-left">
-                <span class="chevron">▾</span>
-                <div class="section-title">Discover Rules</div>
-              </div>
-              <div class="section-header-actions">
-                <button id="refresh-discover" class="header-icon-button" title="Refresh discover rules">
-                  <span class="material-icons-outlined">refresh</span>
-                </button>
-              </div>
-            </div>
-            <div class="section-body">
-              <div class="section-subtitle">Starter rules bundled with Rulebook. Copy them into your project or presets.</div>
-              <div id="discover-tags" class="tag-bar"></div>
-              <ul id="discover-rules" class="rules-list discover-list"></ul>
-            </div>
-          </div>
         </div>
 
         <script nonce="${nonce}">
@@ -1369,7 +812,7 @@ function getNonce(): string {
 }
 
 export function activate(context: vscode.ExtensionContext): void {
-  const rulesManager = new RulesManager(context);
+  const rulesManager = new RulesManager();
   const provider = new AgentRulesViewProvider(rulesManager);
 
   context.subscriptions.push(

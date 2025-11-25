@@ -1,8 +1,0 @@
----
-description: Security Best Practices
-scope: preset
-tag: #Security
-globs:
-alwaysApply: false
----
-

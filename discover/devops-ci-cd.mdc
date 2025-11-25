@@ -1,8 +1,0 @@
----
-description: DevOps CI/CD Workflows
-scope: preset
-tag: #DevOps
-globs:
-alwaysApply: false
----
-
